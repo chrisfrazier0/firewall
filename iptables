@@ -143,8 +143,10 @@ $IPT -t raw -X
 $IPT -t security -X
 
 if [ "$1" = "stop" ]; then
-    echo "Restarting docker service ..."
-    systemctl restart docker
+    if [ "$DOCKER_NET" != "" ]; then
+        echo "Restarting docker service ..."
+        systemctl restart docker
+    fi
     echo "Firewall completely flushed! Now running with no firewall."
     exit 0
 fi
@@ -194,8 +196,10 @@ source ./chains/tcp_outbound.sh
 $IPT -A tcp_inbound -j RETURN
 $IPT -A tcp_outbound -j ACCEPT
 
-$IPT -N DOCKER-USER
-source ./chains/docker_user.sh
+if [ "$DOCKER_NET" != "" ]; then
+    $IPT -N DOCKER-USER
+    source ./chains/docker_user.sh
+fi
 
 ###############################################################################
 #
@@ -218,21 +222,27 @@ else
     $IPT -A INPUT -p ALL -d 224.0.0.1 -j ACCEPT
 fi
 
-# Allow full access from local network
-$IPT -A INPUT -p ALL -i $LOCAL_IFACE -s $LOCAL_NET -j ACCEPT
-$IPT -A INPUT -p ALL -i $LOCAL_IFACE -d $LOCAL_BCAST -j ACCEPT
+if [ "$FIREWALL_LOCAL" != "true" ]; then
+    # Allow full access from local network
+    $IPT -A INPUT -p ALL -i $LOCAL_IFACE -s $LOCAL_NET -j ACCEPT
+    $IPT -A INPUT -p ALL -i $LOCAL_IFACE -d $LOCAL_BCAST -j ACCEPT
+fi
 
-# Allow icmp traffic from local network
-# $IPT -A INPUT -p ICMP -i $LOCAL_IFACE -s $LOCAL_NET -j ACCEPT
+if [ "$LOCAL_ICMP" = "true" ]; then
+    # Allow icmp traffic from local network
+    $IPT -A INPUT -p ICMP -i $LOCAL_IFACE -s $LOCAL_NET -j ACCEPT
+fi
 
 # Accept established connections
 $IPT -A INPUT -p ALL -i $LOCAL_IFACE -m state --state ESTABLISHED,RELATED -j ACCEPT
 $IPT -A INPUT -p ALL -i $INET_IFACE -m state --state ESTABLISHED,RELATED -j ACCEPT
 
 # Route the rest to the appropriate user chain
-# $IPT -A INPUT -p ICMP -i $LOCAL_IFACE -j icmp_packets
-# $IPT -A INPUT -p UDP -i $LOCAL_IFACE -j udp_inbound
-# $IPT -A INPUT -p TCP -i $LOCAL_IFACE -j tcp_inbound
+if [ "$FIREWALL_LOCAL" = "true" ]; then
+    $IPT -A INPUT -p ICMP -i $LOCAL_IFACE -j icmp_packets
+    $IPT -A INPUT -p UDP -i $LOCAL_IFACE -j udp_inbound
+    $IPT -A INPUT -p TCP -i $LOCAL_IFACE -j tcp_inbound
+fi
 $IPT -A INPUT -p ICMP -i $INET_IFACE -j icmp_packets
 $IPT -A INPUT -p UDP -i $INET_IFACE -j udp_inbound
 $IPT -A INPUT -p TCP -i $INET_IFACE -j tcp_inbound
@@ -248,23 +258,25 @@ $IPT -A INPUT -m limit --limit 3/minute --limit-burst 3 -j LOG --log-prefix "INP
 # FORWARD Chain
 #
 
-# echo "Process FORWARD chain ..."
+if [ "$GATEWAY" = "true" ]; then
+    echo "Process FORWARD chain ..."
 
-# Drop bad packets
-# $IPT -A FORWARD -p ALL -j bad_packets
+    # Drop bad packets
+    $IPT -A FORWARD -p ALL -j bad_packets
 
-# Accept UDP and TCP packets we want to forward from internal sources
-# $IPT -A FORWARD -p UDP -i $LOCAL_IFACE -j udp_outbound
-# $IPT -A FORWARD -p TCP -i $LOCAL_IFACE -j tcp_outbound
+    # Accept UDP and TCP packets we want to forward from internal sources
+    $IPT -A FORWARD -p UDP -i $LOCAL_IFACE -j udp_outbound
+    $IPT -A FORWARD -p TCP -i $LOCAL_IFACE -j tcp_outbound
 
-# If not blocked, accept any other packets from the internal interface
-# $IPT -A FORWARD -p ALL -i $LOCAL_IFACE -j ACCEPT
+    # If not blocked, accept any other packets from the internal interface
+    $IPT -A FORWARD -p ALL -i $LOCAL_IFACE -j ACCEPT
 
-# Accept responses from the internet
-# $IPT -A FORWARD -i $INET_IFACE -m state --state ESTABLISHED,RELATED -j ACCEPT
+    # Accept responses from the internet
+    $IPT -A FORWARD -i $INET_IFACE -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-# Log packets that still don't match
-# $IPT -A FORWARD -m limit --limit 3/minute --limit-burst 3 -j LOG --log-prefix "FORWARD packet died: "
+    # Log packets that still don't match
+    $IPT -A FORWARD -m limit --limit 3/minute --limit-burst 3 -j LOG --log-prefix "FORWARD packet died: "
+fi
 
 ###############################################################################
 #
@@ -299,17 +311,21 @@ $IPT -A OUTPUT -m limit --limit 3/minute --limit-burst 3 -j LOG --log-prefix "OU
 # POSTROUTING chain
 #
 
-# echo "Process POSTROUTING chain ..."
+if [ "$GATEWAY" = "true" ]; then
+    echo "Process POSTROUTING chain ..."
 
-# Enable masquerade on internet interface
-# $IPT -t nat -A POSTROUTING -o $INET_IFACE -j MASQUERADE
+    # Enable masquerade on internet interface
+    $IPT -t nat -A POSTROUTING -o $INET_IFACE -j MASQUERADE
+fi
 
 ###############################################################################
 #
-# Reset Docker Service
+# Final steps
 #
 
-echo "Restarting docker service ..."
-systemctl restart docker
+if [ "$DOCKER_NET" != "" ]; then
+    echo "Restarting docker service ..."
+    systemctl restart docker
+fi
 
 echo "Done! Firewall enabled."

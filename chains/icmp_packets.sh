@@ -5,10 +5,10 @@
 # of a denial of service attack.
 $IPT -A icmp_packets --fragment -p ICMP -j DROP
 
-# Echo
-$IPT -A icmp_packets -p ICMP -s 0/0 --icmp-type 8 -j DROP
-# $IPT -A icmp_packets -p ICMP -s 0/0 --icmp-type 8 -j ACCEPT
-
-# Time Exceeded
-$IPT -A icmp_packets -p ICMP -s 0/0 --icmp-type 11 -j DROP
-# $IPT -A icmp_packets -p ICMP -s 0/0 --icmp-type 11 -j ACCEPT
+if [ "$ALLOW_PING" = "true" ]; then
+    $IPT -A icmp_packets -p ICMP -s 0/0 --icmp-type 8 -j DROP
+    $IPT -A icmp_packets -p ICMP -s 0/0 --icmp-type 11 -j DROP
+else
+    $IPT -A icmp_packets -p ICMP -s 0/0 --icmp-type 8 -j ACCEPT
+    $IPT -A icmp_packets -p ICMP -s 0/0 --icmp-type 11 -j ACCEPT
+fi
