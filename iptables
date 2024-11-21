@@ -19,133 +19,33 @@ elif [ "$1" = "restore" ]; then
     exit 0
 fi
 
-###############################################################################
-#
-# Kernel Parameter Configuration
-#
+# Configuration warnings
+if [ "$GATEWAY" = "true" ] && [ "$DOCKER_NET" != "" ]; then
+    echo "This script does not support configuring Docker rules on a gateway."
+    exit 1
+fi
 
-echo "Setting kernel parameters ..."
-
-# Required to enable IPv4 forwarding.
 if [ "$GATEWAY" = "true" ]; then
-    if [ "$SYSCTL" = "" ]; then
-        echo "1" > /proc/sys/net/ipv4/ip_forward
-    else
-        $SYSCTL net.ipv4.ip_forward="1"
+    if [ "$INET_IFACE" = "" ] || [ "$LOCAL_IFACE" = "" ]; then
+        echo "You need to configure an internet and local interface for gateway configuration."
+        exit 1
     fi
 fi
 
-# This enables SYN flood protection.
-if [ "$SYSCTL" = "" ]; then
-    echo "1" > /proc/sys/net/ipv4/tcp_syncookies
-else
-    $SYSCTL net.ipv4.tcp_syncookies="1"
+# Kernel parameters
+if [ "$KERNEL_PARAMS" = "true" ]; then
+    echo "Setting kernel parameters ..."
+    source ./util/kernel_params.sh
 fi
-
-# This enables source validation by reversed path according to RFC1812.
-# In other words, did the response packet originate from the same interface
-# through which the source packet was sent?
-if [ "$SYSCTL" = "" ]; then
-    echo "1" > /proc/sys/net/ipv4/conf/all/rp_filter
-else
-    $SYSCTL net.ipv4.conf.all.rp_filter="1"
-fi
-
-# This kernel parameter instructs the kernel to ignore all ICMP
-# echo requests sent to the broadcast address.
-if [ "$SYSCTL" = "" ]; then
-    echo "1" > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts
-else
-    $SYSCTL net.ipv4.icmp_echo_ignore_broadcasts="1"
-fi
-
-# This option can be used to accept or refuse source routed
-# packets. It is usually on by default, but is generally
-# considered a security risk. This option turns it off.
-if [ "$SYSCTL" = "" ]; then
-    echo "0" > /proc/sys/net/ipv4/conf/all/accept_source_route
-else
-    $SYSCTL net.ipv4.conf.all.accept_source_route="0"
-fi
-
-# This option can disable ICMP redirects. ICMP redirects
-# are generally considered a security risk and shouldn't be
-# needed by most systems using this generator.
-if [ "$SYSCTL" = "" ]; then
-   echo "0" > /proc/sys/net/ipv4/conf/all/accept_redirects
-else
-   $SYSCTL net.ipv4.conf.all.accept_redirects="0"
-fi
-
-# However, we'll ensure the secure_redirects option is on instead.
-# This option accepts only from gateways in the default gateways list.
-if [ "$SYSCTL" = "" ]; then
-    echo "1" > /proc/sys/net/ipv4/conf/all/secure_redirects
-else
-    $SYSCTL net.ipv4.conf.all.secure_redirects="1"
-fi
-
-# This option logs packets from impossible addresses.
-if [ "$SYSCTL" = "" ]; then
-    echo "1" > /proc/sys/net/ipv4/conf/all/log_martians
-else
-    $SYSCTL net.ipv4.conf.all.log_martians="1"
-fi
-
-###############################################################################
-#
-# Flush Any Existing Rules or Chains
-#
 
 echo "Flushing Tables ..."
+source ./util/flush.sh
 
-# Reset Default Policies
-$IPT -P INPUT ACCEPT
-$IPT -P FORWARD ACCEPT
-$IPT -P OUTPUT ACCEPT
-
-$IPT -t nat -P PREROUTING ACCEPT
-$IPT -t nat -P INPUT ACCEPT
-$IPT -t nat -P OUTPUT ACCEPT
-$IPT -t nat -P POSTROUTING ACCEPT
-
-$IPT -t mangle -P PREROUTING ACCEPT
-$IPT -t mangle -P INPUT ACCEPT
-$IPT -t mangle -P FORWARD ACCEPT
-$IPT -t mangle -P OUTPUT ACCEPT
-$IPT -t mangle -P POSTROUTING ACCEPT
-
-$IPT -t filter -P INPUT ACCEPT
-$IPT -t filter -P FORWARD ACCEPT
-$IPT -t filter -P OUTPUT ACCEPT
-
-$IPT -t raw -P PREROUTING ACCEPT
-$IPT -t raw -P OUTPUT ACCEPT
-
-$IPT -t security -P INPUT ACCEPT
-$IPT -t security -P FORWARD ACCEPT
-$IPT -t security -P OUTPUT ACCEPT
-
-# Flush all rules
-$IPT -F
-$IPT -t nat -F
-$IPT -t mangle -F
-$IPT -t filter -F
-$IPT -t raw -F
-$IPT -t security -F
-
-# Erase all non-default chains
-$IPT -X
-$IPT -t nat -X
-$IPT -t mangle -X
-$IPT -t filter -X
-$IPT -t raw -X
-$IPT -t security -X
-
+# Stop argument handled here
 if [ "$1" = "stop" ]; then
     if [ "$DOCKER_NET" != "" ]; then
         echo "Restarting docker service ..."
-        systemctl restart docker
+        $DOCKER_RESTART
     fi
     echo "Firewall completely flushed! Now running with no firewall."
     exit 0
@@ -153,8 +53,10 @@ fi
 
 ###############################################################################
 #
-# Default Policy Configuration
+# Default Policies
 #
+
+echo "Setting default policies ..."
 
 $IPT -P INPUT DROP
 $IPT -P FORWARD DROP
@@ -177,25 +79,30 @@ $IPT -N bad_tcp_packets
 source ./chains/bad_tcp_packets.sh
 $IPT -A bad_tcp_packets -j RETURN
 
-# Create separate chains for icmp, tcp, and udp (incoming and outgoing),
+# ICMP
 $IPT -N icmp_packets
 source ./chains/icmp_packets.sh
 $IPT -A icmp_packets -j RETURN
 
-$IPT -N udp_inbound
-$IPT -N udp_outbound
-source ./chains/udp_inbound.sh
-source ./chains/udp_outbound.sh
-$IPT -A udp_inbound -j RETURN
-$IPT -A udp_outbound -j ACCEPT
-
+# TCP (incoming and outgoing)
 $IPT -N tcp_inbound
-$IPT -N tcp_outbound
 source ./chains/tcp_inbound.sh
-source ./chains/tcp_outbound.sh
 $IPT -A tcp_inbound -j RETURN
-$IPT -A tcp_outbound -j ACCEPT
 
+$IPT -N tcp_outbound
+source ./chains/tcp_outbound.sh
+$IPT -A tcp_outbound -j $TCP_OUTBOUND
+
+# UDP (incoming and outgoing)
+$IPT -N udp_inbound
+source ./chains/udp_inbound.sh
+$IPT -A udp_inbound -j RETURN
+
+$IPT -N udp_outbound
+source ./chains/udp_outbound.sh
+$IPT -A udp_outbound -j $UDP_OUTBOUND
+
+# DOCKER-USER
 if [ "$DOCKER_NET" != "" ]; then
     $IPT -N DOCKER-USER
     source ./chains/docker_user.sh
@@ -218,40 +125,73 @@ $IPT -A INPUT -p ALL -j bad_packets
 # The multicast packets have the destination address 224.0.0.1.
 if [ "$DROP_IGMP_MULTICAST" = "true" ]; then
     $IPT -A INPUT -p ALL -d 224.0.0.1 -j DROP
-else
-    $IPT -A INPUT -p ALL -d 224.0.0.1 -j ACCEPT
 fi
 
-if [ "$FIREWALL_LOCAL" != "true" ]; then
-    # Allow full access from local network
-    $IPT -A INPUT -p ALL -i $LOCAL_IFACE -s $LOCAL_NET -j ACCEPT
-    $IPT -A INPUT -p ALL -i $LOCAL_IFACE -d $LOCAL_BCAST -j ACCEPT
+if [ "$INET_IFACE" != "" ]; then
+    # Accept established connections
+    $IPT -A INPUT -p ALL -i $INET_IFACE -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+    # Allow/filter ICMP traffic from internet
+    if [ "$INET_ICMP" = "allow" ]; then
+        $IPT -A INPUT -p ICMP -i $INET_IFACE -j ACCEPT
+    elif [ "$INET_ICMP" = "firewall" ]; then
+        $IPT -A INPUT -p ICMP -i $INET_IFACE -j icmp_packets
+    fi
+
+    # Allow/filter TCP traffic from internet
+    if [ "$INET_TCP" = "allow" ]; then
+        $IPT -A INPUT -p TCP -i $INET_IFACE -j ACCEPT
+    elif [ "$INET_TCP" = "firewall" ]; then
+        $IPT -A INPUT -p TCP -i $INET_IFACE -j tcp_inbound
+    fi
+
+    # Allow/filter UDP traffic from internet
+    if [ "$INET_UDP" = "allow" ]; then
+        $IPT -A INPUT -p UDP -i $INET_IFACE -j ACCEPT
+    elif [ "$INET_UDP" = "firewall" ]; then
+        $IPT -A INPUT -p UDP -i $INET_IFACE -j udp_inbound
+    fi
 fi
 
-if [ "$LOCAL_ICMP" = "true" ]; then
-    # Allow icmp traffic from local network
-    $IPT -A INPUT -p ICMP -i $LOCAL_IFACE -s $LOCAL_NET -j ACCEPT
-fi
+if [ "$LOCAL_IFACE" != "" ]; then
+    # Accept established connections
+    $IPT -A INPUT -p ALL -i $LOCAL_IFACE -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-# Accept established connections
-$IPT -A INPUT -p ALL -i $LOCAL_IFACE -m state --state ESTABLISHED,RELATED -j ACCEPT
-$IPT -A INPUT -p ALL -i $INET_IFACE -m state --state ESTABLISHED,RELATED -j ACCEPT
+    # Allow/filter ICMP traffic from local network
+    if [ "$LOCAL_ICMP" = "allow" ]; then
+        $IPT -A INPUT -p ICMP -i $LOCAL_IFACE -s $LOCAL_NET -j ACCEPT
+        $IPT -A INPUT -p ICMP -i $LOCAL_IFACE -d $LOCAL_BCAST -j ACCEPT
+    elif [ "$LOCAL_ICMP" = "firewall" ]; then
+        $IPT -A INPUT -p ICMP -i $LOCAL_IFACE -s $LOCAL_NET -j icmp_packets
+        $IPT -A INPUT -p ICMP -i $LOCAL_IFACE -d $LOCAL_BCAST -j icmp_packets
+    fi
 
-# Route the rest to the appropriate user chain
-if [ "$FIREWALL_LOCAL" = "true" ]; then
-    $IPT -A INPUT -p ICMP -i $LOCAL_IFACE -j icmp_packets
-    $IPT -A INPUT -p UDP -i $LOCAL_IFACE -j udp_inbound
-    $IPT -A INPUT -p TCP -i $LOCAL_IFACE -j tcp_inbound
+    # Allow/filter TCP traffic from local network
+    if [ "$LOCAL_TCP" = "allow" ]; then
+        $IPT -A INPUT -p TCP -i $LOCAL_IFACE -s $LOCAL_NET -j ACCEPT
+        $IPT -A INPUT -p TCP -i $LOCAL_IFACE -d $LOCAL_BCAST -j ACCEPT
+    elif [ "$LOCAL_TCP" = "firewall" ]; then
+        $IPT -A INPUT -p TCP -i $LOCAL_IFACE -s $LOCAL_NET -j tcp_inbound
+        $IPT -A INPUT -p TCP -i $LOCAL_IFACE -d $LOCAL_BCAST -j tcp_inbound
+    fi
+
+    # Allow/filter UDP traffic from local network
+    if [ "$LOCAL_UDP" = "allow" ]; then
+        $IPT -A INPUT -p UDP -i $LOCAL_IFACE -s $LOCAL_NET -j ACCEPT
+        $IPT -A INPUT -p UDP -i $LOCAL_IFACE -d $LOCAL_BCAST -j ACCEPT
+    elif [ "$LOCAL_UDP" = "firewall" ]; then
+        $IPT -A INPUT -p UDP -i $LOCAL_IFACE -s $LOCAL_NET -j udp_inbound
+        $IPT -A INPUT -p UDP -i $LOCAL_IFACE -d $LOCAL_BCAST -j udp_inbound
+    fi
 fi
-$IPT -A INPUT -p ICMP -i $INET_IFACE -j icmp_packets
-$IPT -A INPUT -p UDP -i $INET_IFACE -j udp_inbound
-$IPT -A INPUT -p TCP -i $INET_IFACE -j tcp_inbound
 
 # Drop without logging broadcasts that get this far.
 $IPT -A INPUT -m pkttype --pkt-type broadcast -j DROP
 
 # Log packets that still don't match
-$IPT -A INPUT -m limit --limit 3/minute --limit-burst 3 -j LOG --log-prefix "INPUT packet died: "
+if [ "$LOG_DROPS" = "true" ]; then
+    $IPT -A INPUT -m limit --limit 3/minute --limit-burst 3 -j LOG --log-prefix "INPUT packet died: "
+fi
 
 ###############################################################################
 #
@@ -264,18 +204,20 @@ if [ "$GATEWAY" = "true" ]; then
     # Drop bad packets
     $IPT -A FORWARD -p ALL -j bad_packets
 
+    # Accept responses from the internet
+    $IPT -A FORWARD -i $INET_IFACE -m state --state ESTABLISHED,RELATED -j ACCEPT
+
     # Accept UDP and TCP packets we want to forward from internal sources
-    $IPT -A FORWARD -p UDP -i $LOCAL_IFACE -j udp_outbound
     $IPT -A FORWARD -p TCP -i $LOCAL_IFACE -j tcp_outbound
+    $IPT -A FORWARD -p UDP -i $LOCAL_IFACE -j udp_outbound
 
     # If not blocked, accept any other packets from the internal interface
     $IPT -A FORWARD -p ALL -i $LOCAL_IFACE -j ACCEPT
 
-    # Accept responses from the internet
-    $IPT -A FORWARD -i $INET_IFACE -m state --state ESTABLISHED,RELATED -j ACCEPT
-
     # Log packets that still don't match
-    $IPT -A FORWARD -m limit --limit 3/minute --limit-burst 3 -j LOG --log-prefix "FORWARD packet died: "
+    if [ "$LOG_DROPS" = "true" ]; then
+        $IPT -A FORWARD -m limit --limit 3/minute --limit-burst 3 -j LOG --log-prefix "FORWARD packet died: "
+    fi
 fi
 
 ###############################################################################
@@ -289,22 +231,27 @@ echo "Process OUTPUT chain ..."
 $IPT -A OUTPUT -m state -p ICMP --state INVALID -j DROP
 
 # Trust localhost
-$IPT -A OUTPUT -p ALL -s $LO_IP -j ACCEPT
 $IPT -A OUTPUT -p ALL -o $LO_IFACE -j ACCEPT
+$IPT -A OUTPUT -p ALL -s $LO_IP -j ACCEPT
 
 # Filter packets with oubound rules
-$IPT -A OUTPUT -p UDP -o $LOCAL_IFACE -j udp_outbound
-$IPT -A OUTPUT -p TCP -o $LOCAL_IFACE -j tcp_outbound
-$IPT -A OUTPUT -p UDP -o $INET_IFACE -j udp_outbound
-$IPT -A OUTPUT -p TCP -o $INET_IFACE -j tcp_outbound
+if [ "$INET_IFACE" != "" ]; then
+    $IPT -A OUTPUT -p TCP -o $INET_IFACE -j tcp_outbound
+    $IPT -A OUTPUT -p UDP -o $INET_IFACE -j udp_outbound
+    $IPT -A OUTPUT -p ALL -o $INET_IFACE -j $OTHER_OUTBOUND
+fi
 
-# If not blocked, accept all other outbound traffic
-$IPT -A OUTPUT -p ALL -s $LOCAL_IP -j ACCEPT
-$IPT -A OUTPUT -p ALL -o $LOCAL_IFACE -j ACCEPT
-$IPT -A OUTPUT -p ALL -o $INET_IFACE -j ACCEPT
+if [ "$LOCAL_IFACE" != "" ]; then
+    $IPT -A OUTPUT -p TCP -o $LOCAL_IFACE -j tcp_outbound
+    $IPT -A OUTPUT -p UDP -o $LOCAL_IFACE -j udp_outbound
+    $IPT -A OUTPUT -p ALL -o $LOCAL_IFACE -j $OTHER_OUTBOUND
+    $IPT -A OUTPUT -p ALL -s $LOCAL_IP -j $OTHER_OUTBOUND
+fi
 
 # Log packets that still don't match
-$IPT -A OUTPUT -m limit --limit 3/minute --limit-burst 3 -j LOG --log-prefix "OUTPUT packet died: "
+if [ "$LOG_DROPS" = "true" ]; then
+    $IPT -A OUTPUT -m limit --limit 3/minute --limit-burst 3 -j LOG --log-prefix "OUTPUT packet died: "
+fi
 
 ###############################################################################
 #
@@ -325,7 +272,7 @@ fi
 
 if [ "$DOCKER_NET" != "" ]; then
     echo "Restarting docker service ..."
-    systemctl restart docker
+    $DOCKER_RESTART
 fi
 
 echo "Done! Firewall enabled."
