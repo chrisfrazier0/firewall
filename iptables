@@ -102,6 +102,11 @@ $IPT -N udp_outbound
 source ./chains/udp_outbound.sh
 $IPT -A udp_outbound -j $UDP_OUTBOUND
 
+# Utility chain for blocking outbound traffic destined for private IPs
+$IPT -N private_outbound
+source ./chains/private_outbound.sh
+$IPT -A private_outbound -j RETURN
+
 # DOCKER-USER
 if [ "$DOCKER_NET" != "" ]; then
     $IPT -N DOCKER-USER
@@ -207,6 +212,11 @@ if [ "$GATEWAY" = "true" ]; then
     # Accept responses from the internet
     $IPT -A FORWARD -i $INET_IFACE -m state --state ESTABLISHED,RELATED -j ACCEPT
 
+    # Block outbound traffic to private IPs
+    if [ "$DROP_PRIVATE_OUTBOUND" = "true" ]; then
+        $IPT -A OUTPUT -p ALL -o $INET_IFACE -j private_outbound
+    fi
+
     # Accept UDP and TCP packets we want to forward from internal sources
     $IPT -A FORWARD -p TCP -i $LOCAL_IFACE -j tcp_outbound
     $IPT -A FORWARD -p UDP -i $LOCAL_IFACE -j udp_outbound
@@ -236,6 +246,9 @@ $IPT -A OUTPUT -p ALL -s $LO_IP -j ACCEPT
 
 # Filter packets with oubound rules
 if [ "$INET_IFACE" != "" ]; then
+    if [ "$DROP_PRIVATE_OUTBOUND" = "true" ]; then
+        $IPT -A OUTPUT -p ALL -o $INET_IFACE -j private_outbound
+    fi
     $IPT -A OUTPUT -p TCP -o $INET_IFACE -j tcp_outbound
     $IPT -A OUTPUT -p UDP -o $INET_IFACE -j udp_outbound
     $IPT -A OUTPUT -p ALL -o $INET_IFACE -j $OTHER_OUTBOUND
