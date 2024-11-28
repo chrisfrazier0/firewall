@@ -2,7 +2,7 @@
 
 ### Installation
 
-```
+```shell
 apt install iptables-persistent
 git clone https://github.com/chrisfrazier0/firewall /opt/firewall
 rm -rf /opt/firewall/.git/
